@@ -26,4 +26,6 @@ if(MSVC)
     target_compile_options(mml2mdx PRIVATE /utf-8)
 elseif(MINGW)
     target_compile_options(mml2mdx PRIVATE -finput-charset=UTF-8)
+    # 静态链接 libstdc++/libgcc/libwinpthread，使 exe 不依赖 MinGW 运行时 DLL
+    target_link_options(mml2mdx PRIVATE -static -static-libgcc -static-libstdc++)
 endif()
