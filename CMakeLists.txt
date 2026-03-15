@@ -15,6 +15,7 @@ set(MML2MDX_SOURCES
     src/optimizer.cpp
     src/macro.cpp
     src/wave_effect.cpp
+    src/page_merge.cpp
     src/util.cpp
 )
 

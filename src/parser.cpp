@@ -59,6 +59,43 @@ bool Parser::parse(const std::string& input_file, CompilerConfig& config) {
         process_line(line, i + 1);
     }
 
+    // ═══════════════════════════════════════════
+    // 页面合并遍: 将各通道的子页面合并到主通道
+    // ═══════════════════════════════════════════
+    for (auto& [ch_idx, pages_map] : page_channels_) {
+        auto& main_ch = channels_[ch_idx];
+
+        // 展平 page 0 (主通道)
+        int l_tick_0 = -1;
+        auto segs0 = flatten_opcodes(main_ch.opcodes, l_tick_0);
+
+        // 收集所有页面 (page 0 在最前，其后按 page 编号排序)
+        std::vector<std::vector<PageSegment>> all_pages;
+        all_pages.push_back(std::move(segs0));
+
+        for (auto& [pnum, pch] : pages_map) {
+            int l_tick_p = -1;
+            all_pages.push_back(flatten_opcodes(pch.opcodes, l_tick_p));
+        }
+
+        // 合并: L 标记取 page 0 的位置
+        auto merged = merge_pages(all_pages, l_tick_0);
+
+        // 替换主通道的 opcode
+        main_ch.opcodes = std::move(merged);
+
+        // 恢复无限循环标记
+        // merge_pages 在输出中已正确放置 L 标记
+        // 但此处需要重新扫描合并后 opcodes 确认 L 是否存在
+        // (由 merge_pages 内部管理)
+        if (l_tick_0 >= 0) {
+            main_ch.has_infinite_loop = true;
+            // infinite_loop_offset 需要重新计算
+            // merge_pages 不直接输出 CMD_PERF_END，
+            // Parser::parse 末尾的循环会处理
+        }
+    }
+
     // 自动检测 ex-pcm：如果 Q-W 通道有数据，启用 16 通道模式
     if (!config.ex_pcm) {
         for (int i = 9; i < MAX_CHANNELS; i++) {
@@ -142,12 +179,21 @@ void Parser::process_line(const std::string& line, int line_num) {
         }
     }
 
-    // MML 行: A-H, P-W 通道标识符
+    // MML 行: A-H, P-W 通道标识符（支持页面后缀 _ ）
+    // 语法: A = page 0, A_ = page 1, A__ = page 2, ...
+    struct ChPage { int ch_idx; int page; };
+    std::vector<ChPage> ch_pages;
     std::vector<int> channel_indices;
+
     while (pos < line.size()) {
         int idx = channel_index(line[pos]);
         if (idx >= 0) {
-            // 避免重复
+            pos++;
+            // 计算 _ 后缀数量作为页面编号
+            int page = 0;
+            while (pos < line.size() && line[pos] == '_') { page++; pos++; }
+            ch_pages.push_back({idx, page});
+            // 记录去重的通道索引
             bool found = false;
             for (int ci : channel_indices) {
                 if (ci == idx) { found = true; break; }
@@ -155,16 +201,34 @@ void Parser::process_line(const std::string& line, int line_num) {
             if (!found) {
                 channel_indices.push_back(idx);
             }
-            pos++;
         } else {
             break;
         }
     }
 
-    if (!channel_indices.empty()) {
-        // 通道标识符后面是 MML 数据
+    if (!ch_pages.empty()) {
         std::string mml_content = line.substr(pos);
-        process_mml_line(mml_content, line_num, channel_indices);
+        // 检查是否有页面后缀
+        bool has_page = false;
+        for (const auto& cp : ch_pages) {
+            if (cp.page > 0) { has_page = true; break; }
+        }
+
+        if (has_page && ch_pages.size() == 1) {
+            // 单通道 + 页面后缀: 解析到页面存储
+            int ch_idx = ch_pages[0].ch_idx;
+            int page = ch_pages[0].page;
+            auto& pch = page_channels_[ch_idx][page];
+            // 临时交换 channels_ 中的通道状态进行解析
+            ChannelState saved = channels_[ch_idx];
+            channels_[ch_idx] = pch;
+            parse_mml(mml_content, line_num, ch_idx);
+            pch = channels_[ch_idx];
+            channels_[ch_idx] = saved;
+        } else {
+            // 普通模式（无页面或多通道）
+            process_mml_line(mml_content, line_num, channel_indices);
+        }
         return;
     }
 

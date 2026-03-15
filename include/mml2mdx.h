@@ -314,6 +314,37 @@ struct CompilerConfig {
 };
 
 // ═══════════════════════════════════════════
+// 页面（Page）功能 (page_merge.cpp)
+// ═══════════════════════════════════════════
+
+// 页面展平后的段（一个音符或一段休符）
+struct PageSegment {
+    int start_tick = 0;     // 绝对起始 tick
+    int duration = 0;       // 持续 tick 数
+    bool is_note = false;   // true=音符, false=休符
+    int note_byte = 0;      // 音符字节 (0x80-0xDF), 仅 is_note 时有效
+
+    // 该段开始时的通道状态快照
+    int voice = -1;         // @N 音色号
+    int volume_byte = -1;   // CMD_VOLUME 参数字节 (-1=未设定)
+    int pan = -1;           // p 值 (-1=未设定)
+
+    // 该段开始时需要发出的其他命令 (LFO、detune、sync 等)
+    std::vector<uint8_t> prefix_opcodes;
+};
+
+// opcode 流展平: 展开循环，输出 tick 段列表
+// 返回的 infinite_loop_tick: L 标记位置 (-1=无)
+std::vector<PageSegment> flatten_opcodes(
+    const std::vector<uint8_t>& opcodes, int& infinite_loop_tick);
+
+// 多页面合并: pages[0] = 最高优先级
+// 返回合并后的 opcode 流
+std::vector<uint8_t> merge_pages(
+    const std::vector<std::vector<PageSegment>>& pages,
+    int infinite_loop_tick = -1);
+
+// ═══════════════════════════════════════════
 // 波形效果处理函数 (wave_effect.cpp)
 // ═══════════════════════════════════════════
 bool apply_wave_effects(

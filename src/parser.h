@@ -50,6 +50,14 @@ private:
     void parse_mml(const std::string& mml, int line_num, int ch_idx,
                    const std::vector<int>& all_channels = {});
 
+    // 波形效果: 解析辅助
+    void parse_wave_effect(ChannelState::WaveEffectType we_type);
+
+    // 页面数据: page_channels_[ch_idx][page_num] = ChannelState
+    // page 0 存于 channels_[ch_idx]（不在此 map）
+    // page 1, 2, ... 存于此 map
+    std::map<int, std::map<int, ChannelState>> page_channels_;
+
     // 和弦上下文
     std::vector<int> chord_channels_;      // 当前 MML 行的通道列表
     struct ChordNote {

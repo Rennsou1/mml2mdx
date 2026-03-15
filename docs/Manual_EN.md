@@ -97,6 +97,43 @@ SMOF                ; Disable voice macro expansion
 ABC |cdef:efga:gab>c|4    ; A=cdef, B=efga, C=gab>c (shared duration 4)
 ```
 
+### Pages ★
+
+The page feature allows splitting a single channel's MML into multiple "pages". Higher-priority pages take precedence when playing notes; when a higher-priority page is resting, the lower-priority page's output is used instead.
+
+**Syntax**: Append `_` after the channel identifier for lower-priority pages.
+
+| Identifier | Description |
+|------------|-------------|
+| `A` | Page 0 (highest priority) |
+| `A_` | Page 1 |
+| `A__` | Page 2 (and so on) |
+
+**Switching rules**:
+- At each tick, the highest-priority page that is **playing a note** is selected
+- On page switch, voice (@), volume (v/@v), and pan (p) commands are auto-inserted
+- All pages advance in parallel regardless of which is active
+
+**Example**:
+
+```mml
+; Page 0: high priority — plays first half, rests second half
+A  @1v15l8o4 cder rrrr
+
+; Page 1: low priority — rests first half, plays second half
+A_ @1v10l8o3 rrrr cder
+```
+
+After merging, equivalent to:
+
+```mml
+A @1v15l8o4 cder v10o3 cder
+```
+
+> [!WARNING]
+> Page merging **unrolls all `[]` loops**. The merged channel will not contain loop instructions.
+> The `L` (infinite loop) marker is taken from Page 0's position.
+
 ### PCM Frequency (F Values)
 
 PCM channels use the `F` command to set the sample rate. See [PCM Setting.md](PCM%20Setting.md) for the complete table.
@@ -317,6 +354,9 @@ Default whole note = 192 ticks (configurable via `#zenlen`)
 | `/` | Exit loop on last iteration |
 | `L` | Infinite loop start |
 | `C` | Pseudo loop point (timing only) |
+
+> [!NOTE]
+> **Difference from original NOTE**: The original NOTE compiler restores the octave to its value at `[` when `]` is reached. For example, in `o4[cdefgab>c]2 de`, NOTE would play `de` at o4 after the loop ends. mml2mdx does **not** restore octave state — `>` and `<` changes inside the loop body carry over. In the above example, `de` would play at o5. Add an explicit `o` command after `]` if you need NOTE-compatible behavior.
 
 ### Tuplets
 
