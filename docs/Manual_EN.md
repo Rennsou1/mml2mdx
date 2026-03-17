@@ -218,6 +218,11 @@ All `#` directives must appear at the beginning of a line (before channel MML da
 | `#compress [0\|1]` | Duration compression (0=rests only, 1=notes too) |
 | `#opt [flags]` | Optimization (`*`=all, `dvqpt012`=selective) |
 | `#ex-pcm` | Enable PCM8/PCM8++ extended frequency modes |
+| `#ex-loop [0\|1]` | Loop unrolling mode (default 1=enabled) ★ |
+
+> [!NOTE]
+> **#ex-loop**: When enabled, `[]` loops are unrolled at compile time into repeated opcodes
+> Use `#ex-loop 0` to disable (revert to MXDRV hardware loops).
 
 ### File Operations
 
@@ -264,8 +269,21 @@ All `#` directives must appear at the beginning of a line (before channel MML da
 | `c4.` | Dotted (1.5× duration) |
 | `c2..` | Double-dotted (1.75× duration) |
 | `c%<ticks>` | Direct tick specification |
-| `c4&c4` | Tie: durations add up, no re-attack |
+
+### Tie / Duration Arithmetic
+
+| Command | Description |
+|---------|-------------|
+| `c4&c4` | Tie: durations add up, no re-attack (48+48 = 96 ticks) |
 | `c4&d4` | Legato: pitch changes without key-off |
+| `c4&c8&c8` | `&` can be chained (48+24+24 = 96 ticks) |
+| `c4^8` | Duration add: durations sum (48+24 = 72 ticks, same as `c4.`) |
+| `c2~8` | Duration subtract: durations subtract (96-24 = 72 ticks, same as `c4.`) |
+| `c%48^%24` | `^` `~` work with `%` tick notation |
+| `c4^8~16` | `^` `~` can be chained (48+24-12 = 60 ticks) |
+| `r4^4` | Works with rests too |
+
+> `&` connects two complete notes (note names required), while `^` / `~` operate purely on duration values (no note name needed).
 
 Default whole note = 192 ticks (configurable via `#zenlen`)
 
@@ -382,6 +400,15 @@ Default whole note = 192 ticks (configurable via `#zenlen`)
 | `_D<-6144~6144>` | Numeric portamento (1/64 semitone units) |
 | `GL<speed>,<range>` | Glide processing |
 | `GLON` / `GLOF` | Resume / Stop glide |
+| `SL<ticks>` | Auto-slide: set slide duration in ticks and enable ★ |
+| `SLON` / `SLOF` | Resume / Stop auto-slide (SLOF clears memory) ★ |
+
+> [!NOTE]
+> **SL Auto-Slide**: When enabled, each new note automatically slides in from the previous note's pitch
+> over the specified number of ticks. Without `&`, notes re-trigger (key-on); with `&`, legato (no key-off).
+> Rests do not clear pitch memory. `SLOF` clears memory (first note after re-enable won't slide).
+> `SL<new_value>` only updates tick count, preserving pitch memory.
+
 
 ### Sync
 

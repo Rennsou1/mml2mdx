@@ -306,6 +306,13 @@ void Parser::process_pseudo_cmd(const std::string& line, int line_num) {
         config_->pcm_filename = read_string_arg();
     } else if (cmd == "ex-pcm") {
         config_->ex_pcm = true;
+    } else if (cmd == "ex-loop") {
+        // #ex-loop [0|1] — 循环展开模式
+        int val = 1;
+        if (pos < line.size() && line[pos] >= '0' && line[pos] <= '9') {
+            val = read_int_arg();
+        }
+        config_->ex_loop = (val != 0);
     } else if (cmd == "octave-rev") {
         config_->octave_rev = true;
     } else if (cmd == "tps") {
@@ -1277,6 +1284,8 @@ void Parser::parse_mml(const std::string& mml, int line_num, int ch_idx,
                 ch.portamento_pending = false;
                 // 目标音符不输出 — 仅更新信息
                 ch.last_abs_note = abs_note;
+                // SL: 手動 _ 使用時も記憶を更新
+                if (ch.auto_slide_on) ch.auto_slide_last_abs_note = abs_note;
                 // last_duration 不变更（滑音以源音符的音长完成）
                 ch.last_note_opcode_pos = -1; // 插入后重置
                 // 滑音后的 & 是隐式的 (F7 已插入) → 消费
@@ -1340,7 +1349,66 @@ void Parser::parse_mml(const std::string& mml, int line_num, int ch_idx,
 
                     ch.last_abs_note = abs_note;
                     ch.last_duration = duration;
+                    if (ch.auto_slide_on) ch.auto_slide_last_abs_note = abs_note;
                     continue;
+                }
+
+                // SL: 自動滑音（在新音符开头插入前一音的 portamento 滑向当前音）
+                // 原理: F2(rate) F7 prev(slide_dur) → note(remain_dur)
+                // MXDRV 在 key-on 时清除 portamento (offset+rate)
+                if (ch.auto_slide_on && ch.auto_slide_tick > 0
+                    && ch.auto_slide_last_abs_note >= 0
+                    && ch.auto_slide_last_abs_note != abs_note
+                    && !is_pcm_channel(ch_idx)) {
+                    int prev_mdx = ch.auto_slide_last_abs_note - 3;
+                    if (prev_mdx >= 0 && prev_mdx <= 95) {
+                        int prev_nb = NOTE_MIN + prev_mdx;
+                        int slide_dur = std::min(ch.auto_slide_tick, duration);
+                        int remain_dur = duration - slide_dur;
+
+                        // portamento rate: 从前一音滑向当前音
+                        int delta_semi = abs_note - ch.auto_slide_last_abs_note;
+                        constexpr int PITCH_PER_SEMI = 16384;
+                        int64_t rate64 = (int64_t)delta_semi * PITCH_PER_SEMI / slide_dur;
+                        // clamp 到 int16_t 范围（防止大音程溢出导致反向滑音）
+                        int rate = (int)std::max((int64_t)-32768, std::min(rate64, (int64_t)32767));
+
+                        // 連音検出
+                        bool has_tie = ch.legato_pending || (tok.peek() == '&');
+
+                        // ─ 滑音段: 以 legato 继续前一音，portamento 滑向当前音 ─
+                        ch.opcodes.push_back(CMD_PORTAMENTO);
+                        write_be16(ch.opcodes, static_cast<int16_t>(rate));
+                        ch.opcodes.push_back(CMD_LEGATO);
+                        ch.opcodes.push_back(static_cast<uint8_t>(prev_nb));
+                        ch.opcodes.push_back(static_cast<uint8_t>(slide_dur - 1));
+
+                        // ─ 剩余段 ─
+                        if (remain_dur > 0) {
+                            if (has_tie) {
+                                // 有 &: 停止 portamento 速率，继续用前一音字节
+                                // (portamento offset 维持 = 当前音高，base 不变)
+                                ch.opcodes.push_back(CMD_PORTAMENTO);
+                                write_be16(ch.opcodes, static_cast<int16_t>(0));
+                                ch.opcodes.push_back(CMD_LEGATO);
+                                ch.opcodes.push_back(static_cast<uint8_t>(prev_nb));
+                                ch.opcodes.push_back(static_cast<uint8_t>(remain_dur - 1));
+                            } else {
+                                // 无 &: key-on 当前音（MXDRV 清除 portamento）
+                                ch.opcodes.push_back(static_cast<uint8_t>(note_byte));
+                                ch.opcodes.push_back(static_cast<uint8_t>(remain_dur - 1));
+                            }
+                        }
+
+                        // 更新状態
+                        ch.auto_slide_last_abs_note = abs_note;
+                        ch.last_abs_note = abs_note;
+                        ch.last_duration = duration;
+                        ch.last_note_opcode_pos = -1;
+                        if (has_tie && tok.peek() == '&') tok.advance();
+                        ch.legato_pending = false;
+                        continue;
+                    }
                 }
                 
                 // 波形效果分割（apply_wave_effects 返回 true 则分割完成）
@@ -1391,6 +1459,8 @@ void Parser::parse_mml(const std::string& mml, int line_num, int ch_idx,
                 }
                 ch.last_abs_note = abs_note;
                 ch.last_duration = duration;
+                // SL: 更新自動滑音記憶
+                if (ch.auto_slide_on) ch.auto_slide_last_abs_note = abs_note;
                 // x/@x 临时音量的恢复（如果下一个命令是 x 则跳过恢复）
                 if (ch.temp_volume_active) {
                     // 先行读取: 如果下一个命令是 x 则不需要恢复
@@ -1719,10 +1789,15 @@ void Parser::parse_mml(const std::string& mml, int line_num, int ch_idx,
             tok.advance();
             LoopInfo loop;
             loop.start_offset = (int)ch.opcodes.size();
-            ch.opcodes.push_back(CMD_REPEAT_START);
-            // 循环次数在 ] 之后读取，先占位
-            ch.opcodes.push_back(0x02);  // 默认 2 次
-            ch.opcodes.push_back(0x00);
+            if (config_->ex_loop) {
+                // #ex-loop: 保存 token 位置，不输出 F6
+                loop.token_start_pos = tok.pos();
+                loop.remaining_iters = -1; // ] 时初始化
+            } else {
+                ch.opcodes.push_back(CMD_REPEAT_START);
+                ch.opcodes.push_back(0x02);
+                ch.opcodes.push_back(0x00);
+            }
             ch.loop_stack.push_back(loop);
             continue;
         }
@@ -1732,10 +1807,25 @@ void Parser::parse_mml(const std::string& mml, int line_num, int ch_idx,
             tok.advance();
             if (!ch.loop_stack.empty()) {
                 auto& loop = ch.loop_stack.back();
-                loop.escape_offset = (int)ch.opcodes.size();
-                ch.opcodes.push_back(CMD_REPEAT_ESC);
-                ch.opcodes.push_back(0x00);  // 偏移占位
-                ch.opcodes.push_back(0x00);
+                if (config_->ex_loop && loop.token_start_pos >= 0) {
+                    // #ex-loop: 最后一次迭代时跳出——快进到 ]
+                    if (loop.remaining_iters == 0) {
+                        // 跳过到对应的 ]
+                        int nest = 0;
+                        while (!tok.at_end()) {
+                            char tc = tok.peek();
+                            if (tc == '[') { nest++; tok.advance(); }
+                            else if (tc == ']' && nest > 0) { nest--; tok.advance(); tok.skip_whitespace(); int dummy; tok.try_read_int(dummy); }
+                            else if (tc == ']' && nest == 0) { break; }
+                            else { tok.advance(); }
+                        }
+                    }
+                } else {
+                    loop.escape_offset = (int)ch.opcodes.size();
+                    ch.opcodes.push_back(CMD_REPEAT_ESC);
+                    ch.opcodes.push_back(0x00);
+                    ch.opcodes.push_back(0x00);
+                }
             }
             continue;
         }
@@ -1748,32 +1838,39 @@ void Parser::parse_mml(const std::string& mml, int line_num, int ch_idx,
             tok.try_read_int(count);
 
             if (!ch.loop_stack.empty()) {
-                auto loop = ch.loop_stack.back();
-                ch.loop_stack.pop_back();
+                auto& loop = ch.loop_stack.back();
 
-                // 回填循环次数
-                ch.opcodes[loop.start_offset + 1] = static_cast<uint8_t>(count);
+                if (config_->ex_loop && loop.token_start_pos >= 0) {
+                    // #ex-loop: 展开模式
+                    // 第一次达到 ] 时，设定剩余迭代次数（-1 = 未初始化）
+                    if (loop.remaining_iters < 0) {
+                        loop.remaining_iters = count - 1; // 第一轮已解析完毕
+                    }
+                    if (loop.remaining_iters > 0) {
+                        loop.remaining_iters--;
+                        tok.set_pos(loop.token_start_pos); // 回退到 [ 之后
+                    } else {
+                        ch.loop_stack.pop_back();
+                    }
+                } else {
+                    auto loop_copy = loop;
+                    ch.loop_stack.pop_back();
 
-                // 写循环结束
-                // MXDRV L001376: 读 2 字节 offset → negate → A4 -= D0
-                // offset 参照点 = F5 opcode 之后 (即 offset word 所在位置)
-                // 跳转目标 = repeat_start 之后 (F6 + count + counter = start+3)
-                // 所以 offset = start_offset - end_pos (负值, 指向回跳)
-                int loop_end_pos = (int)ch.opcodes.size();
-                ch.opcodes.push_back(CMD_REPEAT_END);
-                int offset = loop.start_offset - loop_end_pos;
-                write_be16(ch.opcodes, static_cast<int16_t>(offset));
+                    // 回填循环次数
+                    ch.opcodes[loop_copy.start_offset + 1] = static_cast<uint8_t>(count);
 
-                // 回填跳出偏移
-                // MXDRV L00139a: 读 2 字节 unsigned offset
-                // A0 = A4 + D0 → A0 指向 repeat_end 的 offset word
-                // 参照点 = escape 指令之后 (F4 + 2 byte = esc+3)
-                // 目标 = repeat_end 的 offset word (end_pos + 1)
-                // offset = (end_pos + 1) - (esc + 3) = end_pos - esc - 2
-                if (loop.escape_offset >= 0) {
-                    int esc_offset = loop_end_pos - loop.escape_offset - 2;
-                    ch.opcodes[loop.escape_offset + 1] = static_cast<uint8_t>((esc_offset >> 8) & 0xFF);
-                    ch.opcodes[loop.escape_offset + 2] = static_cast<uint8_t>(esc_offset & 0xFF);
+                    // 写循环结束
+                    int loop_end_pos = (int)ch.opcodes.size();
+                    ch.opcodes.push_back(CMD_REPEAT_END);
+                    int offset = loop_copy.start_offset - loop_end_pos;
+                    write_be16(ch.opcodes, static_cast<int16_t>(offset));
+
+                    // 回填跳出偏移
+                    if (loop_copy.escape_offset >= 0) {
+                        int esc_offset = loop_end_pos - loop_copy.escape_offset - 2;
+                        ch.opcodes[loop_copy.escape_offset + 1] = static_cast<uint8_t>((esc_offset >> 8) & 0xFF);
+                        ch.opcodes[loop_copy.escape_offset + 2] = static_cast<uint8_t>(esc_offset & 0xFF);
+                    }
                 }
             }
             continue;
@@ -1820,11 +1917,31 @@ void Parser::parse_mml(const std::string& mml, int line_num, int ch_idx,
             continue;
         }
 
-        // 同期送出 S<ch> / SMON / SMOF
+        // 同期送出 S<ch> / SMON / SMOF / SL（自動滑音）
         if (c == 'S') {
             tok.advance();
-            // Check for SMON / SMOF
-            if (tok.peek() == 'M') {
+            if (tok.peek() == 'L') {
+                // SL: 自動滑音
+                tok.advance();
+                if (tok.peek() == 'O') {
+                    tok.advance();
+                    if (tok.peek() == 'N') {
+                        tok.advance();
+                        ch.auto_slide_on = true;  // SLON: 恢复（保留記憶）
+                    } else if (tok.peek() == 'F') {
+                        tok.advance();
+                        ch.auto_slide_on = false;  // SLOF: 关闭 + 清除記憶
+                        ch.auto_slide_last_abs_note = -1;
+                    }
+                } else {
+                    int val;
+                    if (tok.try_read_int(val)) {
+                        ch.auto_slide_tick = val;
+                        ch.auto_slide_on = true;  // SL<tick>: 設定 + 開啟（保留記憶）
+                    }
+                }
+            } else if (tok.peek() == 'M') {
+                // Check for SMON / SMOF
                 tok.advance();
                 if (tok.peek() == 'O') {
                     tok.advance();
@@ -1832,12 +1949,12 @@ void Parser::parse_mml(const std::string& mml, int line_num, int ch_idx,
                     else if (tok.peek() == 'F') { tok.advance(); ch.smon = false; }
                 }
             } else {
-                // S<ch>: 同步发送 — 0-15 或 A-H/P-W (NOTE 文档: 两种方式都支持)
+                // S<ch>: 同步発送 — 0-15 或 A-H/P-W (NOTE 文档: 两種方式都支持)
                 int val = -1;
                 char lc = tok.peek();
                 if (lc >= 'A' && lc <= 'H') { val = lc - 'A'; tok.advance(); }
                 else if (lc >= 'P' && lc <= 'W') { val = lc - 'P' + 8; tok.advance(); }
-                else { tok.try_read_int(val); }  // 数值 0-15
+                else { tok.try_read_int(val); }  // 数値 0-15
                 if (val >= 0 && val <= 15) {
                     ch.opcodes.push_back(CMD_SYNC_SEND);
                     ch.opcodes.push_back(static_cast<uint8_t>(val & 0xFF));

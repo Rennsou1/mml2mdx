@@ -177,6 +177,8 @@ struct LoopInfo {
     int start_offset = 0;     // 循环开始在 opcode 流中的偏移
     int count = 2;            // 循环次数
     int escape_offset = -1;   // '/' 跳出点的偏移（-1 表示没有）
+    int token_start_pos = -1; // #ex-loop 用: [ 之后的 token 位置
+    int remaining_iters = -1; // #ex-loop 用: 剩余展开次数 (-1=未初始化)
 };
 
 // 每通道的编译状态
@@ -225,6 +227,11 @@ struct ChannelState {
     int glide_val = 0;   // glide 音高偏移（半音的 1/64 单位）
     int glide_step = 0;  // glide 步数
     bool glide_on = false;
+
+    // 自动滑音 (SL)
+    int auto_slide_tick = 0;           // SL<tick> 滑音 tick 数
+    bool auto_slide_on = false;        // SLON/SLOF 开关
+    int auto_slide_last_abs_note = -1; // 上一个有效音符的绝対音高（-1=无记忆）
 
     // 音色自动切换 (KS)
     int ks_map = -1;     // -1 = 无效
@@ -304,6 +311,7 @@ struct CompilerConfig {
     int  reste_mode = -1;       // #reste/-1=nreste
     bool coder = false;          // #coder
     int  glide_mode = 0;        // #glide
+    bool ex_loop = true;         // #ex-loop (循环展开，默认开启)
 
     // #flat/#sharp/#natural 全通道设定
     std::array<int, 7> global_note_modifiers = {};

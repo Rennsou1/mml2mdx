@@ -191,6 +191,7 @@ public:
 
     // 当前位置
     int pos() const { return pos_; }
+    void set_pos(int p) { pos_ = p; }
     bool at_end() const { return pos_ >= (int)line_.size(); }
 
     // 跳过空白
